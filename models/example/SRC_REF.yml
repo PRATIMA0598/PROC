@@ -1,0 +1,42 @@
+sources:
+  - name: landing
+    description: The primary soruce system for order management system(OMS) data anlalytics.  
+    database: POC_PROC
+    schema: PROC
+    tables:
+      - name: REF
+        description: REF table       
+        identifier: REF_MARKET_DEFINITION
+      - name: DIM
+        description: Dimension
+        identifier: DIM_SOURCE_PRODUCT
+      - name: VW
+        description: Product-panel.      
+        identifier: VW_LNK_PRODUCT_PNL
+      - name: MKT
+        description: market   
+        identifier: DIM_MARKET
+      - name: PNL
+        description: panel   
+        identifier: DIM_PANEL
+  #       columns:
+  #         - name: address
+  #           description: Full Address of emplyees for Transport Arrangements.          
+  #           tests:
+  #             - not_null
+  #             - string_not_empty
+  #     - name: sales_us
+  #     - name: sales_europe
+  #     - name: sales_asia
+  #     - name: stores
+  #     - name: suppliers
+  #     - name: products
+
+  # - name: training
+  #   database: SLEEKMART_OMS
+  #   schema: TRAINING
+  #   tables:
+  #     - name: city_temperature
+  #     - name: sales_us
+  #     - name: sales_uk
+  #     - name: sales_india
