@@ -19,7 +19,7 @@
     FROM PROC.REF_MARKET_RULES MD
     JOIN PROC.DIM_MARKET M
         ON UPPER(M.MARKET_NM) = UPPER(MD.RULE_NAME)
-    WHERE RULE_NAME ILIKE 'Acid Control_Boost'
+        WHERE RULE_NAME ILIKE'Acid Control_Boost'
     ORDER BY RULE_NAME, RULE_ORDER
 """) %}
 
@@ -34,7 +34,7 @@
                 'RULE_NAME': r.RULE_NAME,
                 'GLOBAL_FLAG': r.GLOBAL_FLAG,
                 'INCLUSION_FLAG': r.INCLUSION_FLAG,
-                'RULE_ORDER':r.RULE_ORDER,
+                'RULE_ORDER': r.RULE_ORDER,
                 'rules': []
             }
         }) %}
@@ -48,7 +48,6 @@
     {% set cond_parts = [] %}
 
     {% for r in rule_data.rules %}
-
         {% set field = r.ATTRIBUTE_NAME %}
         {% set op = r.ATTRIBUTE_OPERATOR %}
         {% set v = r.ATTRIBUTE_VALUE_LIST.replace("'", "''") %}
@@ -76,9 +75,10 @@
 
     {% set final_condition = cond_parts | join(' AND ') %}
 
+    {# ------------------ GLOBAL INSERT LOGIC ------------------ #}
     {% if final_condition != "" and rule_data.INCLUSION_FLAG == 1 and rule_data.GLOBAL_FLAG == 1 %}
 
-        {% set query_sql %}
+        {% set query_insert %}
 INSERT INTO PROC.LNK_MARKET_PRODUCT (SOURCE_PRODUCT_ID, MARKET_ID)
 SELECT DISTINCT SP.SOURCE_PRODUCT_ID, '{{ rule_data.MARKET_ID }}'
 FROM PROC.DIM_SOURCE_PRODUCT SP
@@ -89,13 +89,39 @@ AND {{ final_condition }}
 AND SP.COUNTRY ILIKE 'UKRAINE'
         {% endset %}
 
-        {% set insert_sql %}
+        {% set log_insert %}
 INSERT INTO PROC.COND1 (RULE_NAME,RULE_ORDER,QUER1)
-VALUES ('{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_ORDER }}',$$ {{ query_sql }} $$)
+VALUES ('{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_ORDER }}',$$ {{ query_insert }} $$)
         {% endset %}
 
-        {% do run_query(insert_sql) %}
-        {% do run_query(query_sql) %}
+        {% do run_query(log_insert) %}
+        {# {% do run_query(query_insert) %} #}
+
+    {% endif %}
+
+    {# ------------------ GLOBAL DELETE LOGIC ------------------ #}
+    {% if final_condition != "" and rule_data.INCLUSION_FLAG == 0 and rule_data.GLOBAL_FLAG == 0 %}
+
+        {% set query_delete %}
+DELETE FROM PROC.LNK_MARKET_PRODUCT
+WHERE MARKET_ID = '{{ rule_data.MARKET_ID }}'
+AND SOURCE_PRODUCT_ID IN (
+    SELECT DISTINCT SP.SOURCE_PRODUCT_ID
+    FROM PROC.DIM_SOURCE_PRODUCT SP
+    JOIN PROC.VW_LNK_PRODUCT_PNL SPN ON SPN.SOURCE_PRODUCT_ID = SP.SOURCE_PRODUCT_ID
+    JOIN PROC.DIM_PANEL P ON P.PANEL_ID = SPN.PANEL_ID
+    WHERE {{ final_condition }}
+)
+        {% endset %}
+
+        {% set log_delete %}
+INSERT INTO PROC.COND1 (RULE_NAME,RULE_ORDER,QUER1)
+VALUES ('{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_ORDER }}',$$ {{ query_delete }} $$)
+        {% endset %}
+
+        {% do run_query(log_delete) %}
+        {# {% do run_query(query_delete) %} #}
+
     {% endif %}
 
 {% endfor %}
