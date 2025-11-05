@@ -1,116 +1,100 @@
 {% macro apply_market_rules() %}
 
-{# 1. Truncate temporary tables #}
+-- 1. Truncate Working Tables
 {% do run_query("TRUNCATE TABLE PROC.COND1") %}
 {% do run_query("TRUNCATE TABLE PROC.LNK_MARKET_PRODUCT") %}
 
-{# 2. Get market definitions #}
-{% set market_definitions = run_query("""
+-- 2. Pull all rules for the Market
+{% set rules = run_query("""
     SELECT 
         M.MARKET_ID,
+        MD.RULE_NAME,       
+        MD.RULE_ID,
+        MD.GLOBAL_FLAG,
         MD.INCLUSION_FLAG,
-        CASE
-            WHEN UPPER(MD.MARKET_NM_OPERATOR) = 'NOT LIKE' THEN 'LIKE'
-            WHEN UPPER(MD.MARKET_NM_OPERATOR) = '<>' THEN '='
-            ELSE UPPER(MD.MARKET_NM_OPERATOR)
-        END AS MARKET_NM_OPERATOR_D,
-        MD.*
-    FROM PROC.REF_MARKET_DEFINITION MD
+        MD.ATTRIBUTE_NAME,
+        MD.ATTRIBUTE_OPERATOR,
+        MD.ATTRIBUTE_VALUE_LIST,
+        MD.RULE_ORDER
+    FROM PROC.REF_MARKET_RULES MD
     JOIN PROC.DIM_MARKET M
-      ON UPPER(M.MARKET_NM) = UPPER(MD.MARKET_DEFINITION_NM)
-    ORDER BY MARKET_DEFINITION_ID, MARKET_DEFINITION_ORDER ASC
+        ON UPPER(M.MARKET_NM) = UPPER(MD.RULE_NAME)
+    WHERE RULE_NAME ILIKE 'Acid Control_Boost'
+    ORDER BY RULE_NAME, RULE_ORDER
 """) %}
 
-{# 3. Loop through each market definition and build dynamic conditions #}
-{% for r in market_definitions %}
+-- 3. Group rules by (RULE_NAME + RULE_ORDER)
+{% set grouped = {} %}
+{% for r in rules %}
+    {% set key = r.RULE_NAME ~ ':' ~ r.RULE_ORDER %}  
+    {% if key not in grouped %}
+        {% set _ = grouped.update({
+            key: {
+                'MARKET_ID': r.MARKET_ID,
+                'RULE_NAME': r.RULE_NAME,
+                'GLOBAL_FLAG': r.GLOBAL_FLAG,
+                'INCLUSION_FLAG': r.INCLUSION_FLAG,
+                'RULE_ORDER':r.RULE_ORDER,
+                'rules': []
+            }
+        }) %}
+    {% endif %}
+    {% set _ = grouped[key]['rules'].append(r) %}
+{% endfor %}
+
+-- 4. Build ONE combined WHERE clause per group
+{% for grp_key, rule_data in grouped.items() %}
 
     {% set cond_parts = [] %}
 
-    {# Fields to handle dynamically #}
-    {% set dynamic_fields = [
-        ['COUNTRY', 'COUNTRY_OPERATOR'],
-        ['PANEL', 'PANEL_OPERATOR'],
-        ['CHANNEL', 'CHANNEL_OPERATOR'],
-        ['CLASS_TYPE', 'CLASS_TYPE_OPERATOR'],
-        ['ATC4', 'ATC4_OPERATOR'],
-        ['PRODUCT_LOCAL', 'PRODUCT_LOCAL_OPERATOR'],
-        ['PRODUCT', 'PRODUCT_OPERATOR'],
-        ['MANUFACTURER', 'MANUFACTURER_OPERATOR'],
-        ['CORPORATION_LOCAL', 'CORPORATION_LOCAL_OPERATOR'],
-        ['CORPORATION', 'CORPORATION_OPERATOR'],
-        ['MOLECULE_LIST_LOCAL', 'MOLECULE_LIST_LOCAL_OPERATOR'],
-        ['MOLECULE_LIST', 'MOLECULE_LIST_OPERATOR'],
-        ['PACK', 'PACK_OPERATOR'],
-        ['PACK_LOCAL', 'PACK_LOCAL_OPERATOR'],
-        ['NFC123', 'NFC123_OPERATOR'],
-        ['NFC123_LOCAL', 'NFC123_LOCAL_OPERATOR'],
-        ['CHC_CLASS', 'CHC_CLASS_OPERATOR'],
-        ['CHC_FORM', 'CHC_FORM_OPERATOR'],
-        ['RX_STATUS', 'RX_STATUS_OPERATOR']
-    ] %}
+    {% for r in rule_data.rules %}
 
-    {# 4. Build dynamic condition #}
-    {% for field, operator in dynamic_fields %}
-        {% set value = r[field] %}
-        {% set op = r[operator] %}
-        {% if value and value|trim != '' %}
+        {% set field = r.ATTRIBUTE_NAME %}
+        {% set op = r.ATTRIBUTE_OPERATOR %}
+        {% set v = r.ATTRIBUTE_VALUE_LIST.replace("'", "''") %}
 
-            {# Determine table alias #}
-            {% if field in ['CHANNEL', 'PANEL', 'CLASS_TYPE'] %}
-                {% set col_ref = "P." ~ field %}
-            {% else %}
-                {% set col_ref = "SP." ~ field %}
-            {% endif %}
-
-            {# Handle multi-value (;) or single value #}
-            {% if ';' in value %}
-                {% set vals_list = value.split(';') %}
-                {% set vals_upper = vals_list 
-                    | map('trim') 
-                    | map('upper') 
-                    | map('replace', "'", "''") 
-                    | list %}
-                {% set vals_str = vals_upper | join("','") %}
-
-                {# Use IN or NOT IN depending on operator #}
-                {% if op == '<>' %}
-                    {% set _ = cond_parts.append("UPPER(" ~ col_ref ~ ") NOT IN ('" ~ vals_str ~ "')") %}
-                {% else %}
-                    {% set _ = cond_parts.append("UPPER(" ~ col_ref ~ ") IN ('" ~ vals_str ~ "')") %}
-                {% endif %}
-            {% else %}
-                {% set safe_value = value|upper|replace("'", "''") %}
-                {% set _ = cond_parts.append("UPPER(" ~ col_ref ~ ") " ~ op ~ " '" ~ safe_value ~ "'") %}
-            {% endif %}
-
+        {% if field in ['CHANNEL','PANEL','CLASS_TYPE'] %}
+            {% set col = "P." ~ field %}
+        {% else %}
+            {% set col = "SP." ~ field %}
         {% endif %}
+
+        {% if ';' in v %}
+            {% set vals = v.split(';') | map('trim') | map('upper') | list %}
+            {% set vals_str = vals | join("','") %}
+            {% if op == '<>' %}
+                {% set _ = cond_parts.append("UPPER(" ~ col ~ ") NOT IN ('" ~ vals_str ~ "')") %}
+            {% else %}
+                {% set _ = cond_parts.append("UPPER(" ~ col ~ ") IN ('" ~ vals_str ~ "')") %}
+            {% endif %}
+        {% else %}
+            {% set safe_v = v | upper %}
+            {% set _ = cond_parts.append("UPPER(" ~ col ~ ") " ~ op ~ " '" ~ safe_v ~ "'") %}
+        {% endif %}
+
     {% endfor %}
 
-    {% set cond1 = cond_parts | join(' AND ') %}
+    {% set final_condition = cond_parts | join(' AND ') %}
 
-    {# 5. Only build query if inclusion_flag = 1 #}
-    {% if cond1 != "" and r.INCLUSION_FLAG == 1 %}
+    {% if final_condition != "" and rule_data.INCLUSION_FLAG == 1 and rule_data.GLOBAL_FLAG == 1 %}
+
         {% set query_sql %}
-INSERT INTO PROC.LNK_MARKET_PRODUCT(SOURCE_PRODUCT_ID, MARKET_ID)
-SELECT DISTINCT SP.SOURCE_PRODUCT_ID, '{{ r.MARKET_ID }}'
-FROM PROC.DIM_SOURCE_PRODUCT AS SP
-INNER JOIN PROC.VW_LNK_PRODUCT_PNL SPN
-    ON SPN.SOURCE_PRODUCT_ID = SP.SOURCE_PRODUCT_ID
-INNER JOIN PROC.DIM_PANEL AS P
-    ON SPN.PANEL_ID = P.PANEL_ID
+INSERT INTO PROC.LNK_MARKET_PRODUCT (SOURCE_PRODUCT_ID, MARKET_ID)
+SELECT DISTINCT SP.SOURCE_PRODUCT_ID, '{{ rule_data.MARKET_ID }}'
+FROM PROC.DIM_SOURCE_PRODUCT SP
+JOIN PROC.VW_LNK_PRODUCT_PNL SPN ON SPN.SOURCE_PRODUCT_ID = SP.SOURCE_PRODUCT_ID
+JOIN PROC.DIM_PANEL P ON P.PANEL_ID = SPN.PANEL_ID
 WHERE IFNULL(P.EXCLUSION_FLAG,0) = 0
-AND {{ cond1 }}
+AND {{ final_condition }}
 AND SP.COUNTRY ILIKE 'UKRAINE'
         {% endset %}
 
-        {# Insert cond1 and query_sql into PROC.COND1 #}
-        {#{% set insert_sql %}
-            INSERT INTO PROC.COND1 (MARKET_DEFINITION_ID, COND1, QUER1)
-            VALUES ('{{ r.MARKET_DEFINITION_ID }}', $$ {{ cond1 }} $$, $$ {{ query_sql }} $$)
+        {% set insert_sql %}
+INSERT INTO PROC.COND1 (RULE_NAME,RULE_ORDER,QUER1)
+VALUES ('{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_ORDER }}',$$ {{ query_sql }} $$)
         {% endset %}
-        {% do run_query(insert_sql) %}#}
 
-        {# Execute the query_sql to insert into PROC.LNK_MARKET_PRODUCT #}
+        {% do run_query(insert_sql) %}
         {% do run_query(query_sql) %}
     {% endif %}
 
