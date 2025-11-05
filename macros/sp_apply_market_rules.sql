@@ -1,7 +1,7 @@
 {% macro apply_market_rules() %}
 
 -- 1. Truncate Working Tables
-{% do run_query("TRUNCATE TABLE PROC.COND1") %}
+{% do run_query("TRUNCATE TABLE PROC.MARKET_RULE_SQL_LOG") %}
 {% do run_query("TRUNCATE TABLE PROC.LNK_MARKET_PRODUCT") %}
 
 -- 2. Pull all rules for the Market
@@ -19,7 +19,7 @@
     FROM PROC.REF_MARKET_RULES MD
     JOIN PROC.DIM_MARKET M
         ON UPPER(M.MARKET_NM) = UPPER(MD.RULE_NAME)
-        WHERE RULE_NAME ILIKE'Acid Control_Boost'
+        --WHERE RULE_NAME ILIKE'Acid Control_Boost'
     ORDER BY RULE_NAME, RULE_ORDER
 """) %}
 
@@ -90,7 +90,7 @@ AND SP.COUNTRY ILIKE 'UKRAINE'
         {% endset %}
 
         {% set log_insert %}
-INSERT INTO PROC.COND1 (RULE_NAME,RULE_ORDER,QUER1)
+INSERT INTO PROC.MARKET_RULE_SQL_LOG (RULE_NAME,RULE_ORDER,QUER1)
 VALUES ('{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_ORDER }}',$$ {{ query_insert }} $$)
         {% endset %}
 
@@ -115,7 +115,7 @@ AND SOURCE_PRODUCT_ID IN (
         {% endset %}
 
         {% set log_delete %}
-INSERT INTO PROC.COND1 (RULE_NAME,RULE_ORDER,QUER1)
+INSERT INTO PROC.MARKET_RULE_SQL_LOG (RULE_NAME,RULE_ORDER,QUER1)
 VALUES ('{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_ORDER }}',$$ {{ query_delete }} $$)
         {% endset %}
 
