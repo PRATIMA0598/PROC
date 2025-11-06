@@ -19,7 +19,8 @@
     FROM PROC.REF_MARKET_RULES MD
     JOIN PROC.DIM_MARKET M
         ON UPPER(M.MARKET_NM) = UPPER(MD.RULE_NAME)
-        --WHERE RULE_NAME ILIKE'Acid Control_Boost'
+        WHERE (GLOBAL_FLAG IS NOT NULL AND INCLUSION_FLAG IS NOT NULL)
+        --RULE_NAME ILIKE'Acid Control_Boost'
     ORDER BY RULE_NAME, RULE_ORDER
 """) %}
 
@@ -90,17 +91,17 @@ AND SP.COUNTRY ILIKE 'UKRAINE'
         {% endset %}
 
         {% set log_insert %}
-INSERT INTO PROC.MARKET_RULE_SQL_LOG (RULE_NAME,RULE_ORDER,QUER1)
-VALUES ('{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_ORDER }}',$$ {{ query_insert }} $$)
+INSERT INTO PROC.MARKET_RULE_SQL_LOG (RULES_TYPE,RULE_NAME,RULE_ORDER,GENERATED_SQL)
+VALUES ('GLOBAL_INSERT','{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_ORDER }}',$$ {{ query_insert }} $$)
         {% endset %}
 
         {% do run_query(log_insert) %}
-        {# {% do run_query(query_insert) %} #}
+        {#{% do run_query(query_insert) %} #}
 
     {% endif %}
 
     {# ------------------ GLOBAL DELETE LOGIC ------------------ #}
-    {% if final_condition != "" and rule_data.INCLUSION_FLAG == 0 and rule_data.GLOBAL_FLAG == 0 %}
+    {% if final_condition != "" and rule_data.INCLUSION_FLAG == 0 and rule_data.GLOBAL_FLAG == 1 %}
 
         {% set query_delete %}
 DELETE FROM PROC.LNK_MARKET_PRODUCT
@@ -115,14 +116,63 @@ AND SOURCE_PRODUCT_ID IN (
         {% endset %}
 
         {% set log_delete %}
-INSERT INTO PROC.MARKET_RULE_SQL_LOG (RULE_NAME,RULE_ORDER,QUER1)
-VALUES ('{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_ORDER }}',$$ {{ query_delete }} $$)
+INSERT INTO PROC.MARKET_RULE_SQL_LOG (RULES_TYPE,RULE_NAME,RULE_ORDER,GENERATED_SQL)
+VALUES ('GLOBAL_DELETE','{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_ORDER }}',$$ {{ query_delete }} $$)
         {% endset %}
 
         {% do run_query(log_delete) %}
         {# {% do run_query(query_delete) %} #}
 
     {% endif %}
+
+  {# ------------------ LOCAL INSERT LOGIC ------------------ #}
+    {% if final_condition != "" and rule_data.INCLUSION_FLAG == 1 and rule_data.GLOBAL_FLAG == 0 %}
+
+        {% set query_insert_local %}
+INSERT INTO PROC.LNK_MARKET_PRODUCT (SOURCE_PRODUCT_ID, MARKET_ID)
+SELECT DISTINCT SP.SOURCE_PRODUCT_ID, '{{ rule_data.MARKET_ID }}'
+FROM PROC.DIM_SOURCE_PRODUCT SP
+JOIN PROC.VW_LNK_PRODUCT_PNL SPN ON SPN.SOURCE_PRODUCT_ID = SP.SOURCE_PRODUCT_ID
+JOIN PROC.DIM_PANEL P ON P.PANEL_ID = SPN.PANEL_ID
+WHERE IFNULL(P.EXCLUSION_FLAG,0) = 0
+AND {{ final_condition }}
+AND SP.COUNTRY ILIKE 'UKRAINE'
+        {% endset %}
+
+        {% set log_insert_local %}
+INSERT INTO PROC.MARKET_RULE_SQL_LOG (RULES_TYPE,RULE_NAME,RULE_ORDER,GENERATED_SQL)
+VALUES ('LOCAL_INSERT','{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_ORDER }}',$$ {{query_insert_local}} $$)
+        {% endset %}
+
+        {% do run_query(log_insert_local) %}
+        {#{% do run_query(query_insert) %} #}
+
+    {% endif %}
+
+    {# ------------------ LOCAL DELETE LOGIC ------------------ #}
+    {% if final_condition != "" and rule_data.INCLUSION_FLAG == 0 and rule_data.GLOBAL_FLAG == 0 %}
+
+        {% set query_delete_local %}
+DELETE FROM PROC.LNK_MARKET_PRODUCT
+WHERE MARKET_ID = '{{ rule_data.MARKET_ID }}'
+AND SOURCE_PRODUCT_ID IN (
+    SELECT DISTINCT SP.SOURCE_PRODUCT_ID
+    FROM PROC.DIM_SOURCE_PRODUCT SP
+    JOIN PROC.VW_LNK_PRODUCT_PNL SPN ON SPN.SOURCE_PRODUCT_ID = SP.SOURCE_PRODUCT_ID
+    JOIN PROC.DIM_PANEL P ON P.PANEL_ID = SPN.PANEL_ID
+    WHERE {{ final_condition }}
+)
+        {% endset %}
+
+        {% set log_delete_local %}
+INSERT INTO PROC.MARKET_RULE_SQL_LOG (RULES_TYPE,RULE_NAME,RULE_ORDER,GENERATED_SQL)
+VALUES ('LOCAL_DELETE','{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_ORDER }}',$$ {{ query_delete_local }} $$)
+        {% endset %}
+
+        {% do run_query(log_delete_local) %}
+        {# {% do run_query(query_delete) %} #}
+
+    {% endif %}  
 
 {% endfor %}
 
