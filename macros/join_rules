@@ -1,0 +1,6 @@
+{% macro join_rules(rule_columns, join_type='LEFT') %}
+  {%- for col in rule_columns %}
+    {{ join_type }} JOIN rules_{{ col.name | lower }} r_{{ col.name | lower }}
+      ON UPPER(m.MARKET_NM) = UPPER(r_{{ col.name | lower }}.MARKET_DEFINITION_NM)
+  {%- endfor %}
+{% endmacro %}
