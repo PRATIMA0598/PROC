@@ -15,22 +15,22 @@
         MD.ATTRIBUTE_NAME,
         MD.ATTRIBUTE_OPERATOR,
         MD.ATTRIBUTE_VALUE_LIST,
-        MD.RULE_ORDER,
+        MD.RULE_SET,
         MAX(CASE WHEN MD.ATTRIBUTE_NAME = 'MANUFACTURER' THEN 1 ELSE 0 END)
-            OVER (PARTITION BY MD.RULE_NAME, MD.RULE_ORDER) AS HAS_MANUFACTURER,
+            OVER (PARTITION BY MD.RULE_NAME, MD.RULE_SET) AS HAS_MANUFACTURER,
         MAX(CASE WHEN MD.ATTRIBUTE_NAME = 'CORPORATION' THEN 1 ELSE 0 END)
-            OVER (PARTITION BY MD.RULE_NAME, MD.RULE_ORDER) AS HAS_CORPORATION
+            OVER (PARTITION BY MD.RULE_NAME, MD.RULE_SET) AS HAS_CORPORATION
     FROM SL_SANDBOX.FLASH_HUB_POC.REF_MARKET_RULES MD
     JOIN DF_SINERGI.DWH_MARKET_SALES.DIM_MARKET M
         ON UPPER(M.MARKET_NM) = UPPER(MD.RULE_NAME)
     WHERE (GLOBAL_FLAG IS NOT NULL AND INCLUSION_FLAG IS NOT NULL)
-    ORDER BY RULE_NAME, RULE_ORDER
+    ORDER BY RULE_NAME, RULE_SET
 """) %}
 
--- 3. Group rules by RULE_NAME + RULE_ORDER
+-- 3. Group rules by RULE_NAME + RULE_SET
 {% set grouped = {} %}
 {% for r in rules %}
-    {% set key = r.RULE_NAME ~ ':' ~ r.RULE_ORDER %}
+    {% set key = r.RULE_NAME ~ ':' ~ r.RULE_SET %}
     {% if key not in grouped %}
         {% set _ = grouped.update({
             key: {
@@ -39,7 +39,7 @@
                 'RULE_NAME': r.RULE_NAME,
                 'GLOBAL_FLAG': r.GLOBAL_FLAG,
                 'INCLUSION_FLAG': r.INCLUSION_FLAG,
-                'RULE_ORDER': r.RULE_ORDER,
+                'RULE_SET': r.RULE_SET,
                 'HAS_MANUFACTURER': r.HAS_MANUFACTURER,
                 'HAS_CORPORATION': r.HAS_CORPORATION,
                 'rules': []
@@ -150,17 +150,43 @@ JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_PACK P ON F.PACK_ID = P.PACK_ID
 JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_PANEL PL ON F.PANEL_ID = PL.PANEL_ID
 {{ joins | join('\n') }}
 WHERE IFNULL(PL.EXCLUSION_FLAG,0) = 0
-  AND {{ final_condition }};
+  AND {{ final_condition }}
         {% endset %}
 
         {% set log_insert %}
 INSERT INTO SL_SANDBOX.FLASH_HUB_POC.MARKET_RULE_SQL_LOG 
-(RULES_TYPE, RULE_NAME, RULE_ORDER, GENERATED_SQL)
-VALUES ('GLOBAL_INSERT','{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_ORDER }}',$$ {{ query_insert }} $$)
+(RULES_TYPE, RULE_NAME, RULE_SET, GENERATED_SQL)
+VALUES ('GLOBAL_INSERT','{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_SET }}',$$ {{ query_insert }} $$)
         {% endset %}
 
         {% do run_query(log_insert) %}
+        {#{% do run_query(query_insert) %}#}
     {% endif %}
+{# ------------------ GLOBAL DELETE LOGIC ------------------ #}
+    {% if final_condition != "" and rule_data.INCLUSION_FLAG == 0 and rule_data.GLOBAL_FLAG == 1 %}
 
+        {% set query_delete %}
+DELETE FROM SL_SANDBOX.FLASH_HUB_POC.LNK_MARKET_PRODUCT
+WHERE MARKET_ID = '{{ rule_data.MARKET_ID }}'
+AND PACK_ID IN (
+    SELECT DISTINCT P.PACK_ID
+   FROM DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.FCT_SALES_NATIONAL F
+   JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_PACK P ON F.PACK_ID = P.PACK_ID
+   JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_PANEL PL ON F.PANEL_ID = PL.PANEL_ID
+   {{ joins | join('\n') }}
+   WHERE IFNULL(PL.EXCLUSION_FLAG,0) = 0
+  AND {{ final_condition }}
+)
+        {% endset %}
+
+        {% set log_delete %}
+INSERT INTO SL_SANDBOX.FLASH_HUB_POC.MARKET_RULE_SQL_LOG (RULES_TYPE,RULE_NAME,RULE_SET,GENERATED_SQL)
+VALUES ('GLOBAL_DELETE','{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_SET }}',$$ {{ query_delete }} $$)
+        {% endset %}
+
+        {#{% do run_query(log_delete) %}#}
+        {# {% do run_query(query_delete) %} #}
+
+    {% endif %}
 {% endfor %}
 {% endmacro %}
