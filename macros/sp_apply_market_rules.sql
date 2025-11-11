@@ -143,8 +143,9 @@
 
         {% set query_insert %}
 INSERT INTO SL_SANDBOX.FLASH_HUB_POC.LNK_MARKET_PRODUCT
-(RULE_ID, COUNTRY_ID, PANEL_ID, FREQUENCY, MARKET_ID, PACK_ID)
-SELECT DISTINCT '{{ rule_data.RULE_ID }}', F.COUNTRY_ID, F.PANEL_ID, PL.FREQUENCY, '{{ rule_data.MARKET_ID }}', P.PACK_ID
+(RULE_SET, COUNTRY_ID, PANEL_ID, FREQUENCY, MARKET_ID, PACK_ID)
+
+SELECT DISTINCT '{{ rule_data.RULE_SET }}', F.COUNTRY_ID, F.PANEL_ID, PL.FREQUENCY, '{{ rule_data.MARKET_ID }}', P.PACK_ID
 FROM DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.FCT_SALES_NATIONAL F
 JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_PACK P ON F.PACK_ID = P.PACK_ID
 JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_PANEL PL ON F.PANEL_ID = PL.PANEL_ID
@@ -184,9 +185,62 @@ INSERT INTO SL_SANDBOX.FLASH_HUB_POC.MARKET_RULE_SQL_LOG (RULES_TYPE,RULE_NAME,R
 VALUES ('GLOBAL_DELETE','{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_SET }}',$$ {{ query_delete }} $$)
         {% endset %}
 
-        {#{% do run_query(log_delete) %}#}
+        {% do run_query(log_delete) %}
         {# {% do run_query(query_delete) %} #}
 
     {% endif %}
+
+    {# ------------------ LOCAL INSERT LOGIC ------------------ #}
+    {% if final_condition != "" and rule_data.INCLUSION_FLAG == 1 and rule_data.GLOBAL_FLAG == 0 %}
+
+        {% set query_insert_local %}
+INSERT INTO SL_SANDBOX.FLASH_HUB_POC.LNK_MARKET_PRODUCT
+(RULE_SET, COUNTRY_ID, PANEL_ID, FREQUENCY, MARKET_ID, PACK_ID)
+
+SELECT DISTINCT '{{ rule_data.RULE_SET }}', F.COUNTRY_ID, F.PANEL_ID, PL.FREQUENCY, '{{ rule_data.MARKET_ID }}', P.PACK_ID
+FROM DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.FCT_SALES_NATIONAL F
+JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_PACK P ON F.PACK_ID = P.PACK_ID
+JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_PANEL PL ON F.PANEL_ID = PL.PANEL_ID
+{{ joins | join('\n') }}
+WHERE IFNULL(PL.EXCLUSION_FLAG,0) = 0
+  AND {{ final_condition }}
+        {% endset %}
+
+     {% set log_insert_local %}
+INSERT INTO SL_SANDBOX.FLASH_HUB_POC.MARKET_RULE_SQL_LOG (RULES_TYPE,RULE_NAME,RULE_SET,GENERATED_SQL)
+VALUES ('LOCAL_INSERT','{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_SET }}',$$ {{query_insert_local}} $$)
+        {% endset %}
+
+        {% do run_query(log_insert_local) %}
+        {#{% do run_query(query_insert) %}#}
+
+    {% endif %}
+
+    {# ------------------ LOCAL DELETE LOGIC ------------------ #}
+    {% if final_condition != "" and rule_data.INCLUSION_FLAG == 0 and rule_data.GLOBAL_FLAG == 0 %}
+
+        {% set query_delete_local %}
+DELETE FROM SL_SANDBOX.FLASH_HUB_POC.LNK_MARKET_PRODUCT
+WHERE MARKET_ID = '{{ rule_data.MARKET_ID }}'
+AND PACK_ID IN (
+    SELECT DISTINCT P.PACK_ID
+   FROM DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.FCT_SALES_NATIONAL F
+   JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_PACK P ON F.PACK_ID = P.PACK_ID
+   JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_PANEL PL ON F.PANEL_ID = PL.PANEL_ID
+   {{ joins | join('\n') }}
+   WHERE IFNULL(PL.EXCLUSION_FLAG,0) = 0
+  AND {{ final_condition }}
+)
+        {% endset %}
+
+        {% set log_delete_local %}
+INSERT INTO SL_SANDBOX.FLASH_HUB_POC.MARKET_RULE_SQL_LOG (RULES_TYPE,RULE_NAME,RULE_SET,GENERATED_SQL)
+VALUES ('LOCAL_DELETE','{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_SET }}',$$ {{ query_delete_local }} $$)
+        {% endset %}
+
+        {% do run_query(log_delete_local) %}
+        {#{% do run_query(query_delete) %}#}
+
+    {% endif %}  
 {% endfor %}
 {% endmacro %}
