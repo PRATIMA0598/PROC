@@ -1,10 +1,10 @@
 {% macro apply_market_rules() %}
 
--- 1. Truncate Working Tables
+-- 1. Truncate working tables
 {% do run_query("TRUNCATE TABLE SL_SANDBOX.FLASH_HUB_POC.MARKET_RULE_SQL_LOG") %}
 {% do run_query("TRUNCATE TABLE SL_SANDBOX.FLASH_HUB_POC.LNK_MARKET_PRODUCT") %}
 
--- 2. Pull all rules for the Market
+-- 2. Pull all rules for the Market with flags for manufacturer/corporation
 {% set rules = run_query("""
     SELECT 
         M.MARKET_ID,
@@ -15,7 +15,11 @@
         MD.ATTRIBUTE_NAME,
         MD.ATTRIBUTE_OPERATOR,
         MD.ATTRIBUTE_VALUE_LIST,
-        MD.RULE_ORDER
+        MD.RULE_ORDER,
+        MAX(CASE WHEN MD.ATTRIBUTE_NAME = 'MANUFACTURER' THEN 1 ELSE 0 END)
+            OVER (PARTITION BY MD.RULE_NAME, MD.RULE_ORDER) AS HAS_MANUFACTURER,
+        MAX(CASE WHEN MD.ATTRIBUTE_NAME = 'CORPORATION' THEN 1 ELSE 0 END)
+            OVER (PARTITION BY MD.RULE_NAME, MD.RULE_ORDER) AS HAS_CORPORATION
     FROM SL_SANDBOX.FLASH_HUB_POC.REF_MARKET_RULES MD
     JOIN DF_SINERGI.DWH_MARKET_SALES.DIM_MARKET M
         ON UPPER(M.MARKET_NM) = UPPER(MD.RULE_NAME)
@@ -36,6 +40,8 @@
                 'GLOBAL_FLAG': r.GLOBAL_FLAG,
                 'INCLUSION_FLAG': r.INCLUSION_FLAG,
                 'RULE_ORDER': r.RULE_ORDER,
+                'HAS_MANUFACTURER': r.HAS_MANUFACTURER,
+                'HAS_CORPORATION': r.HAS_CORPORATION,
                 'rules': []
             }
         }) %}
@@ -43,37 +49,19 @@
     {% set _ = grouped[key]['rules'].append(r) %}
 {% endfor %}
 
--- 4. Mapping ATTRIBUTE_NAME → Table Alias
+-- 4. Table mapping
 {% set table_map = {
-    'CHANNEL': 'PL',
-    'PANEL': 'PL',
-
+    'CHANNEL': 'PL', 'PANEL': 'PL',
     'COUNTRY': 'C',
-
     'ATC4_CD': 'ATC',
-
-    'PRODUCT_LOCAL': 'DP',
-    'PRODUCT_CLEANED': 'DP',
-
-    'ORGANIZATION_NAME': 'O',
-    'MANUFACTURER': 'O',
-    'CORPORATION': 'O',
-
-    'MOLECULE_NAME_LOCAL': 'M',
-    'MOLECULE_NAME': 'M',
-
-    'PACK_CLEANED': 'P',
-    'PACK_LOCAL': 'P',
-    'CHC_CLASS': 'P',
-    'CHC_FORM': 'P',
-
-    'NFC123_LOCAL': 'NFC',
-    'NFC123_CD': 'NFC',
-
+    'PRODUCT_LOCAL': 'DP', 'PRODUCT_CLEANED': 'DP',
+    'ORGANIZATION_NAME': 'O', 'MANUFACTURER': 'O', 'CORPORATION': 'O',
+    'MOLECULE_NAME_LOCAL': 'M', 'MOLECULE_NAME': 'M',
+    'PACK_CLEANED': 'P', 'PACK_LOCAL': 'P', 'CHC_CLASS': 'P', 'CHC_FORM': 'P',
+    'NFC123_LOCAL': 'NFC', 'NFC123_CD': 'NFC',
     'RX_STATUS': 'RS'
 } %}
 
--- Column name transformation map
 {% set column_map = {
     'MANUFACTURER': 'ORGANIZATION_NAME',
     'CORPORATION': 'ORGANIZATION_NAME',
@@ -87,7 +75,6 @@
 
     {% for r in rule_data.rules %}
         {% set field = r.ATTRIBUTE_NAME %}
-
         {% if field == 'CLASS_TYPE' %}
             {% continue %}
         {% endif %}
@@ -117,37 +104,41 @@
     {% endfor %}
 
     {% set final_condition = cond_parts | join(' AND ') %}
-
     {% set joins = [] %}
 
+    {# --- DP + O joins --- #}
+    {% if rule_data.HAS_MANUFACTURER == 1 or rule_data.HAS_CORPORATION == 1 %}
+        {% set _ = joins.append("JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_PRODUCT DP ON DP.PRODUCT_ID = P.PACK_ID") %}
+    {% endif %}
+
+    {% if rule_data.HAS_MANUFACTURER == 1 %}
+        {% set _ = joins.append("JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_ORGANIZATION O ON O.ORGANIZATION_ID = DP.ORGANIZATION_ID AND O.ORGANIZATION_TYPE ILIKE 'MNF'") %}
+    {% endif %}
+
+    {% if rule_data.HAS_CORPORATION == 1 %}
+        {% set _ = joins.append("JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_ORGANIZATION O ON O.ORGANIZATION_ID = DP.ORGANIZATION_ID") %}
+        {% set _ = joins.append("JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.ORGANIZATION_HIER H ON H.DEPT_ORGANIZATION_ID=O.ORGANIZATION_ID AND O.ORGANIZATION_TYPE ILIKE 'MNF'") %}
+        {% set _ = joins.append("JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_ORGANIZATION H1 ON H.PARENT_ORGANIZATION_ID=H1.ORGANIZATION_ID AND H1.ORGANIZATION_TYPE ILIKE 'CORP'") %}
+    {% endif %}
+
+    {# --- Other joins --- #}
     {% if 'C' in needed_aliases %}
         {% set _ = joins.append("JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_COUNTRY C ON F.COUNTRY_ID = C.COUNTRY_ID") %}
     {% endif %}
-
-    {% if 'DP' in needed_aliases %}
-        {% set _ = joins.append("JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_PRODUCT DP ON DP.PRODUCT_ID = P.PRODUCT_ID") %}
-    {% endif %}
-
     {% if 'ATC' in needed_aliases %}
         {% set _ = joins.append("JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_ATC ATC ON ATC.ATC_ID = P.ATC_ID") %}
     {% endif %}
-
     {% if 'M' in needed_aliases %}
         {% set _ = joins.append("JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_MOLECULE M ON M.MOLECULE_ID = P.MOLECULE_ID") %}
     {% endif %}
-
     {% if 'NFC' in needed_aliases %}
         {% set _ = joins.append("JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_NFC NFC ON NFC.NFC_ID = P.NFC_ID") %}
     {% endif %}
-
-    {% if 'O' in needed_aliases %}
-        {% set _ = joins.append("JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.DIM_ORGANIZATION O ON O.ORGANIZATION_ID = DP.ORGANIZATION_ID") %}
-    {% endif %}
-
     {% if 'RS' in needed_aliases %}
-        {% set _ = joins.append("JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.RX_STATUS RS ON RS.RX_STATUS_ID = DP.RX_STATUS_ID") %}
+        {% set _ = joins.append("JOIN DF_FLASH_ANALYTICS.GOLD_MARKET_SALES.RX_STATUS RS ON RS.RX_STATUS_ID = P.RX_STATUS_ID") %}
     {% endif %}
 
+    {# --- Insert and log --- #}
     {% if final_condition != "" and rule_data.INCLUSION_FLAG == 1 and rule_data.GLOBAL_FLAG == 1 %}
 
         {% set query_insert %}
@@ -163,14 +154,13 @@ WHERE IFNULL(PL.EXCLUSION_FLAG,0) = 0
         {% endset %}
 
         {% set log_insert %}
-INSERT INTO SL_SANDBOX.FLASH_HUB_POC.MARKET_RULE_SQL_LOG (RULES_TYPE, RULE_NAME, RULE_ORDER, GENERATED_SQL)
+INSERT INTO SL_SANDBOX.FLASH_HUB_POC.MARKET_RULE_SQL_LOG 
+(RULES_TYPE, RULE_NAME, RULE_ORDER, GENERATED_SQL)
 VALUES ('GLOBAL_INSERT','{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_ORDER }}',$$ {{ query_insert }} $$)
         {% endset %}
 
         {% do run_query(log_insert) %}
-
     {% endif %}
 
 {% endfor %}
-
 {% endmacro %}
