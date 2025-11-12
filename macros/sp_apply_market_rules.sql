@@ -6,7 +6,6 @@
 {% set log_table_row = run_query("SELECT TABLE_NAME FROM SL_SANDBOX.FLASH_HUB_POC.REF_DYNAMIC_JOINS WHERE SPECIAL_FLAG = 'LOG_TABLE' LIMIT 1") %}
 {% set log_table = log_table_row[0].TABLE_NAME %}
 
-
 -- 2. Truncate working tables dynamically
 {% do run_query("TRUNCATE TABLE " ~ log_table) %}
 {% do run_query("TRUNCATE TABLE " ~ target_table) %}
@@ -79,6 +78,14 @@ ORDER BY RULE_NAME, RULE_SET
     'ORGANIZATION_NAME': 'ORGANIZATION_NAME'
 } %}
 
+-- 7. Load all join definitions
+{% set join_rows = run_query("SELECT TABLE_ALIAS, TABLE_NAME, JOIN_CONDITION, SPECIAL_FLAG, DEPENDENCY_ALIAS FROM SL_SANDBOX.FLASH_HUB_POC.REF_DYNAMIC_JOINS") %}
+{% set join_map = {} %}
+{% for row in join_rows %}
+    {% set _ = join_map.update({ row.TABLE_ALIAS: row }) %}
+{% endfor %}
+
+-- 8. Process each grouped rule
 {% for grp_key, rule_data in grouped.items() %}
 
     {% set cond_parts = [] %}
@@ -86,9 +93,7 @@ ORDER BY RULE_NAME, RULE_SET
 
     {% for r in rule_data.rules %}
         {% set field = r.ATTRIBUTE_NAME %}
-        {% if field == 'CLASS_TYPE' %}
-            {% continue %}
-        {% endif %}
+        {% if field == 'CLASS_TYPE' %} {% continue %} {% endif %}
         {% set alias = table_map.get(field) %}
         {% if alias and alias not in needed_aliases %}
             {% set _ = needed_aliases.append(alias) %}
@@ -112,29 +117,18 @@ ORDER BY RULE_NAME, RULE_SET
 
     {% set final_condition = cond_parts | join(' AND ') %}
 
-    -- Load all join definitions
-    {% set join_rows = run_query("SELECT TABLE_ALIAS, TABLE_NAME, JOIN_CONDITION, SPECIAL_FLAG, DEPENDENCY_ALIAS FROM SL_SANDBOX.FLASH_HUB_POC.REF_DYNAMIC_JOINS") %}
-
-    {% set join_map = {} %}
-    {% for row in join_rows %}
-        {% set _ = join_map.update({ row.TABLE_ALIAS: row }) %}
-    {% endfor %}
-
-    -- Add special flags (Manufacturer / Corporation)
+    {# ---------------- Add special flags (Manufacturer / Corporation) ---------------- #}
     {% for row in join_rows %}
         {% if row.SPECIAL_FLAG == 'MANUFACTURER' and rule_data.HAS_MANUFACTURER == 1 %}
-            {% if row.TABLE_ALIAS not in needed_aliases %}
-                {% set _ = needed_aliases.append(row.TABLE_ALIAS) %}
-            {% endif %}
+            {% if row.TABLE_ALIAS not in needed_aliases %} {% set _ = needed_aliases.append(row.TABLE_ALIAS) %} {% endif %}
         {% endif %}
         {% if row.SPECIAL_FLAG == 'CORPORATION' and rule_data.HAS_CORPORATION == 1 %}
-            {% if row.TABLE_ALIAS not in needed_aliases %}
-                {% set _ = needed_aliases.append(row.TABLE_ALIAS) %}
-            {% endif %}
+            {% if row.TABLE_ALIAS not in needed_aliases %} {% set _ = needed_aliases.append(row.TABLE_ALIAS) %} {% endif %}
         {% endif %}
     {% endfor %}
 
-    -- Add dependency aliases recursively
+    {# ---------------- Add dependency aliases recursively ---------------- #}
+    {% set all_included_aliases = [] %}
     {% for _ in range(5000) %}
         {% set added = [] %}
         {% for alias in needed_aliases %}
@@ -145,53 +139,39 @@ ORDER BY RULE_NAME, RULE_SET
                 {% endif %}
             {% endif %}
         {% endfor %}
-        {% if added | length == 0 %}
-            {% break %}
-        {% endif %}
+        {% if added | length == 0 %} {% break %} {% endif %}
         {% set _ = needed_aliases.extend(added) %}
     {% endfor %}
 
-    -- STATIC_BASE tables separated
-    {% set first_static = join_rows | selectattr("SPECIAL_FLAG","equalto","STATIC_BASE") | selectattr("JOIN_CONDITION","equalto","1=1") | list %}
-    {% set remaining_static = join_rows | selectattr("SPECIAL_FLAG","equalto","STATIC_BASE") | rejectattr("JOIN_CONDITION","equalto","1=1") | list %}
+    {# ---------------- Build FROM clause with STATIC_BASE priority ---------------- #}
+    {% set base_clause_lines = [] %}
 
-    -- Dynamic dependency joins
-    {% set joins = [] %}
-    {% set included_aliases = [] %}
-    {% set remaining_aliases = needed_aliases[:] %}
-    {% for _ in range(50) %}
-        {% if remaining_aliases | length == 0 %}
-            {% break %}
+    -- 1) STATIC_BASE tables with 1=1
+    {% for s in join_rows | selectattr("SPECIAL_FLAG","equalto","STATIC_BASE") | selectattr("JOIN_CONDITION","equalto","1=1") %}
+        {% if s.TABLE_ALIAS not in all_included_aliases %}
+            {% set _ = base_clause_lines.append(s.TABLE_NAME ~ " " ~ s.TABLE_ALIAS) %}
+            {% set _ = all_included_aliases.append(s.TABLE_ALIAS) %}
         {% endif %}
-        {% set newly_included = [] %}
-        {% for alias in remaining_aliases %}
-            {% if alias in join_map %}
-                {% set row = join_map[alias] %}
-                {% set dep = row.DEPENDENCY_ALIAS %}
-                {% if dep is none or dep in included_aliases %}
-                    {% set join_sql = "JOIN " ~ row.TABLE_NAME ~ " " ~ row.TABLE_ALIAS ~ " ON " ~ row.JOIN_CONDITION %}
-                    {% if join_sql not in joins %}
-                        {% set _ = joins.append(join_sql) %}
-                    {% endif %}
-                    {% if row.TABLE_ALIAS not in included_aliases %}
-                        {% set _ = newly_included.append(row.TABLE_ALIAS) %}
-                    {% endif %}
-                {% endif %}
-            {% endif %}
-        {% endfor %}
-        {% if newly_included | length == 0 %}
-            {% break %}
-        {% endif %}
-        {% set _ = included_aliases.extend(newly_included) %}
-        {% set remaining_aliases = remaining_aliases | reject("in", included_aliases) | list %}
     {% endfor %}
 
-    -- Build full FROM clause
-{% set base_clause %} 
-FROM {{ first_static[0].TABLE_NAME }} {{ first_static[0].TABLE_ALIAS }}
-{% for r in remaining_static %} JOIN {{ r.TABLE_NAME }} {{ r.TABLE_ALIAS }} ON {{ r.JOIN_CONDITION }}{% endfor %}
-{% for j in joins %} {{ j }}{% endfor %}
-{% endset %}
+    -- 2) Remaining STATIC_BASE tables
+    {% for s in join_rows | selectattr("SPECIAL_FLAG","equalto","STATIC_BASE") | rejectattr("JOIN_CONDITION","equalto","1=1") %}
+        {% if s.TABLE_ALIAS not in all_included_aliases %}
+            {% set _ = base_clause_lines.append("JOIN " ~ s.TABLE_NAME ~ " " ~ s.TABLE_ALIAS ~ " ON " ~ s.JOIN_CONDITION) %}
+            {% set _ = all_included_aliases.append(s.TABLE_ALIAS) %}
+        {% endif %}
+    {% endfor %}
+
+    -- 3) Add dependency joins in needed_aliases order
+    {% for alias in needed_aliases %}
+        {% if alias in join_map and alias not in all_included_aliases %}
+            {% set row = join_map[alias] %}
+            {% set _ = base_clause_lines.append("JOIN " ~ row.TABLE_NAME ~ " " ~ row.TABLE_ALIAS ~ " ON " ~ row.JOIN_CONDITION) %}
+            {% set _ = all_included_aliases.append(alias) %}
+        {% endif %}
+    {% endfor %}
+
+    {% set base_clause = "FROM\n" ~ base_clause_lines | join("\n") %}
 
     {# ------------------ GLOBAL INSERT ------------------ #}
     {% if final_condition != "" and rule_data.INCLUSION_FLAG == 1 and rule_data.GLOBAL_FLAG == 1 %}
@@ -275,25 +255,10 @@ VALUES ('LOCAL_DELETE','{{ rule_data.RULE_NAME }}','{{ rule_data.RULE_SET }}',$$
 
 {% endfor %}
 
--- 1) GLOBAL INSERT: write log then execute query
-{% for pair in global_inserts %}
-    {% do run_query(pair.log) %}
-{% endfor %}
-
--- 2) GLOBAL DELETE
-{% for pair in global_deletes %}
-    {% do run_query(pair.log) %}
-    {#{% do run_query(pair.query) %}#}
-{% endfor %}
-
--- 3) LOCAL INSERT
-{% for pair in local_inserts %}
-    {% do run_query(pair.log) %}
-{% endfor %}
-
--- 4) LOCAL DELETE
-{% for pair in local_deletes %}
-    {% do run_query(pair.log) %}
-{% endfor %}
+-- Execute all logs first (queries can be executed as needed)
+{% for pair in global_inserts %} {% do run_query(pair.log) %} {% endfor %}
+{% for pair in global_deletes %} {% do run_query(pair.log) %} {% endfor %}
+{% for pair in local_inserts %} {% do run_query(pair.log) %} {% endfor %}
+{% for pair in local_deletes %} {% do run_query(pair.log) %} {% endfor %}
 
 {% endmacro %}
